@@ -7,7 +7,6 @@ using namespace std;
 
 const int PAGE_SIZE = 512;
 
-
 struct Record {
     string codigo;
     int ciclo;
@@ -25,13 +24,14 @@ vector<char> serialize(const Record& r) {
     };
 
     writeString(r.codigo);
+
     buffer.insert(buffer.end(), (char*)&r.ciclo, (char*)&r.ciclo + sizeof(int));
     buffer.insert(buffer.end(), (char*)&r.mensualidad, (char*)&r.mensualidad + sizeof(float));
+
     writeString(r.observaciones);
 
     return buffer;
 }
-
 
 Record deserialize(const char* data) {
     Record r;
@@ -47,6 +47,7 @@ Record deserialize(const char* data) {
     };
 
     readString(r.codigo);
+
     memcpy(&r.ciclo, data + pos, sizeof(int));
     pos += sizeof(int);
 
@@ -58,13 +59,12 @@ Record deserialize(const char* data) {
     return r;
 }
 
-
 struct Slot {
     int offset;
     int length;
 };
 
-
+// ======================= SLOTTED PAGE =======================
 class SlottedPage {
 public:
     char data[PAGE_SIZE];
@@ -75,6 +75,7 @@ public:
         setFreePtr(PAGE_SIZE);
     }
 
+    // -------- HEADER --------
     int getNumSlots() {
         return *(int*)data;
     }
@@ -93,16 +94,17 @@ public:
 
     Slot getSlot(int i) {
         Slot s;
-        int offset = sizeof(int)*2 + i*sizeof(Slot);
-        memcpy(&s, data + offset, sizeof(Slot));
+        int pos = sizeof(int)*2 + i*sizeof(Slot);
+        memcpy(&s, data + pos, sizeof(Slot));
         return s;
     }
 
     void setSlot(int i, Slot s) {
-        int offset = sizeof(int)*2 + i*sizeof(Slot);
-        memcpy(data + offset, &s, sizeof(Slot));
+        int pos = sizeof(int)*2 + i*sizeof(Slot);
+        memcpy(data + pos, &s, sizeof(Slot));
     }
 
+    
     bool addRecord(const Record& r) {
         vector<char> bytes = serialize(r);
         int recSize = bytes.size();
@@ -128,20 +130,23 @@ public:
 
     Record readRecord(int pos) {
         Slot s = getSlot(pos);
-        if (s.length == -1) throw runtime_error("Registro eliminado");
+
+        if (s.length == -1)
+            throw runtime_error("Registro eliminado");
 
         return deserialize(data + s.offset);
     }
 
     void removeRecord(int pos) {
         Slot s = getSlot(pos);
-        s.length = -1;
+        s.length = -1; // marcar eliminado
         setSlot(pos, s);
     }
 };
 
-
+// ======================= HEAP FILE =======================
 class HeapFile {
+private:
     string filename;
 
 public:
@@ -173,6 +178,7 @@ public:
         if (!inserted) {
             SlottedPage newPage;
             newPage.addRecord(r);
+
             file.clear();
             file.seekp(0, ios::end);
             file.write(newPage.data, PAGE_SIZE);
@@ -182,38 +188,103 @@ public:
     }
 
     vector<Record> load() {
-        vector<Record> res;
+        vector<Record> result;
         ifstream file(filename, ios::binary);
 
         SlottedPage page;
 
         while (file.read(page.data, PAGE_SIZE)) {
             int n = page.getNumSlots();
+
             for (int i = 0; i < n; i++) {
                 Slot s = page.getSlot(i);
+
                 if (s.length != -1) {
-                    res.push_back(deserialize(page.data + s.offset));
+                    result.push_back(deserialize(page.data + s.offset));
                 }
             }
         }
 
-        return res;
+        return result;
+    }
+
+    Record readRecord(int globalPos) {
+        ifstream file(filename, ios::binary);
+        SlottedPage page;
+
+        int count = 0;
+
+        while (file.read(page.data, PAGE_SIZE)) {
+            int n = page.getNumSlots();
+
+            for (int i = 0; i < n; i++) {
+                Slot s = page.getSlot(i);
+
+                if (s.length != -1) {
+                    if (count == globalPos)
+                        return deserialize(page.data + s.offset);
+                    count++;
+                }
+            }
+        }
+
+        throw runtime_error("Posición fuera de rango");
+    }
+
+    void remove(int globalPos) {
+        fstream file(filename, ios::in | ios::out | ios::binary);
+        SlottedPage page;
+
+        int count = 0;
+
+        while (file.read(page.data, PAGE_SIZE)) {
+            int n = page.getNumSlots();
+
+            for (int i = 0; i < n; i++) {
+                Slot s = page.getSlot(i);
+
+                if (s.length != -1) {
+                    if (count == globalPos) {
+                        page.removeRecord(i);
+
+                        file.seekp(-PAGE_SIZE, ios::cur);
+                        file.write(page.data, PAGE_SIZE);
+                        return;
+                    }
+                    count++;
+                }
+            }
+        }
+
+        throw runtime_error("Posición no encontrada");
     }
 };
 
 int main() {
     HeapFile hf("data.dat");
 
-    Record r1 = {"A001", 1, 1500.5, "Obs1"};
-    Record r2 = {"A002", 2, 2000.0, "Obs2 larga"};
-    Record r3 = {"A003", 3, 1800.0, "Otra observacion"};
+    hf.add({"A001", 1, 1500.5, "Obs corta"});
+    hf.add({"A002", 2, 2000.0, "Observacion mas larga"});
+    hf.add({"A003", 3, 1800.0, "Texto adicional"});
 
-    hf.add(r1);
-    hf.add(r2);
-    hf.add(r3);
-
+    cout << "---- LOAD ----\n";
     auto records = hf.load();
+    for (auto& r : records) {
+        cout << r.codigo << " "
+             << r.ciclo << " "
+             << r.mensualidad << " "
+             << r.observaciones << endl;
+    }
 
+    cout << "\n---- READ (pos 1) ----\n";
+    auto r = hf.readRecord(1);
+    cout << r.codigo << endl;
+
+    cout << "\n---- DELETE (pos 1) ----\n";
+    hf.remove(1);
+
+    cout << "\n---- LOAD AFTER DELETE ----\n";
+    records = hf.load();
     for (auto& r : records) {
         cout << r.codigo << " "
              << r.ciclo << " "
