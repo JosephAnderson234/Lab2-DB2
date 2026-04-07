@@ -1,381 +1,223 @@
-#include <cstring>
-#include <cstdio>
-#include <fstream>
 #include <iostream>
-#include <stdexcept>
-#include <string>
+#include <fstream>
 #include <vector>
+#include <cstring>
+
+using namespace std;
+
+const int PAGE_SIZE = 512;
+
 
 struct Record {
-    std::string codigo;
+    string codigo;
     int ciclo;
     float mensualidad;
-    std::string observaciones;
+    string observaciones;
 };
 
-inline void appendBytes(std::vector<char>& out, const void* src, std::size_t count) {
-    const char* bytes = static_cast<const char*>(src);
-    out.insert(out.end(), bytes, bytes + count);
+vector<char> serialize(const Record& r) {
+    vector<char> buffer;
+
+    auto writeString = [&](const string& s) {
+        int len = s.size();
+        buffer.insert(buffer.end(), (char*)&len, (char*)&len + sizeof(int));
+        buffer.insert(buffer.end(), s.begin(), s.end());
+    };
+
+    writeString(r.codigo);
+    buffer.insert(buffer.end(), (char*)&r.ciclo, (char*)&r.ciclo + sizeof(int));
+    buffer.insert(buffer.end(), (char*)&r.mensualidad, (char*)&r.mensualidad + sizeof(float));
+    writeString(r.observaciones);
+
+    return buffer;
 }
 
-inline void appendInt(std::vector<char>& out, int value) {
-    appendBytes(out, &value, sizeof(int));
+
+Record deserialize(const char* data) {
+    Record r;
+    int pos = 0;
+
+    auto readString = [&](string& s) {
+        int len;
+        memcpy(&len, data + pos, sizeof(int));
+        pos += sizeof(int);
+
+        s.assign(data + pos, len);
+        pos += len;
+    };
+
+    readString(r.codigo);
+    memcpy(&r.ciclo, data + pos, sizeof(int));
+    pos += sizeof(int);
+
+    memcpy(&r.mensualidad, data + pos, sizeof(float));
+    pos += sizeof(float);
+
+    readString(r.observaciones);
+
+    return r;
 }
 
-inline void appendFloat(std::vector<char>& out, float value) {
-    appendBytes(out, &value, sizeof(float));
-}
-
-inline int readInt(const std::vector<char>& data, std::size_t& cursor) {
-    if (cursor + sizeof(int) > data.size()) {
-        throw std::runtime_error("Buffer insuficiente al leer int");
-    }
-
-    int value = 0;
-    std::memcpy(&value, data.data() + cursor, sizeof(int));
-    cursor += sizeof(int);
-    return value;
-}
-
-inline float readFloat(const std::vector<char>& data, std::size_t& cursor) {
-    if (cursor + sizeof(float) > data.size()) {
-        throw std::runtime_error("Buffer insuficiente al leer float");
-    }
-
-    float value = 0.0f;
-    std::memcpy(&value, data.data() + cursor, sizeof(float));
-    cursor += sizeof(float);
-    return value;
-}
-
-inline std::vector<char> serialize(const Record& r) {
-    std::vector<char> out;
-
-    appendInt(out, static_cast<int>(r.codigo.size()));
-    appendBytes(out, r.codigo.data(), r.codigo.size());
-
-    appendInt(out, r.ciclo);
-    appendFloat(out, r.mensualidad);
-
-    appendInt(out, static_cast<int>(r.observaciones.size()));
-    appendBytes(out, r.observaciones.data(), r.observaciones.size());
-
-    return out;
-}
-
-inline Record deserialize(const std::vector<char>& data) {
-    std::size_t cursor = 0;
-    Record result;
-
-    int codigoSize = readInt(data, cursor);
-    if (codigoSize < 0 || cursor + static_cast<std::size_t>(codigoSize) > data.size()) {
-        throw std::runtime_error("Tamaño inválido para codigo");
-    }
-    result.codigo.assign(data.data() + cursor, data.data() + cursor + codigoSize);
-    cursor += static_cast<std::size_t>(codigoSize);
-
-    result.ciclo = readInt(data, cursor);
-    result.mensualidad = readFloat(data, cursor);
-
-    int obsSize = readInt(data, cursor);
-    if (obsSize < 0 || cursor + static_cast<std::size_t>(obsSize) > data.size()) {
-        throw std::runtime_error("Tamaño inválido para observaciones");
-    }
-    result.observaciones.assign(data.data() + cursor, data.data() + cursor + obsSize);
-
-    return result;
-}
 
 struct Slot {
     int offset;
     int length;
 };
 
-struct PageHeader {
-    int num_slots;
-    int free_ptr;
-};
 
-class VariableRecordFile {
-private:
-    std::fstream file;
-    std::string filename;
-    static constexpr int PAGE_SIZE = 4096;
-    static constexpr int INVALID_LENGTH = 0;
-
-    int pageCount() {
-        file.clear();
-        file.seekg(0, std::ios::end);
-        const std::streamoff size = file.tellg();
-        return static_cast<int>(size / PAGE_SIZE);
-    }
-
-    std::vector<char> readPage(int pageId) {
-        if (pageId < 0 || pageId >= pageCount()) {
-            throw std::out_of_range("Página fuera de rango");
-        }
-
-        std::vector<char> page(PAGE_SIZE, 0);
-        file.clear();
-        file.seekg(static_cast<std::streamoff>(pageId) * PAGE_SIZE, std::ios::beg);
-        file.read(page.data(), PAGE_SIZE);
-
-        if (!file) {
-            throw std::runtime_error("No se pudo leer la página");
-        }
-
-        return page;
-    }
-
-    void writePage(int pageId, const std::vector<char>& page) {
-        if (static_cast<int>(page.size()) != PAGE_SIZE) {
-            throw std::invalid_argument("Página inválida: tamaño incorrecto");
-        }
-
-        file.clear();
-        file.seekp(static_cast<std::streamoff>(pageId) * PAGE_SIZE, std::ios::beg);
-        file.write(page.data(), PAGE_SIZE);
-
-        if (!file) {
-            throw std::runtime_error("No se pudo escribir la página");
-        }
-
-        file.flush();
-    }
-
-    PageHeader readHeader(const std::vector<char>& page) {
-        PageHeader header{};
-        std::memcpy(&header, page.data(), sizeof(PageHeader));
-        return header;
-    }
-
-    void writeHeader(std::vector<char>& page, const PageHeader& header) {
-        std::memcpy(page.data(), &header, sizeof(PageHeader));
-    }
-
-    Slot readSlot(const std::vector<char>& page, int slotId) {
-        const std::size_t offset = sizeof(PageHeader) + static_cast<std::size_t>(slotId) * sizeof(Slot);
-        Slot slot{};
-        std::memcpy(&slot, page.data() + offset, sizeof(Slot));
-        return slot;
-    }
-
-    void writeSlot(std::vector<char>& page, int slotId, const Slot& slot) {
-        const std::size_t offset = sizeof(PageHeader) + static_cast<std::size_t>(slotId) * sizeof(Slot);
-        std::memcpy(page.data() + offset, &slot, sizeof(Slot));
-    }
-
-    int freeSpace(const PageHeader& header) const {
-        const int slotDirectoryEnd =
-            static_cast<int>(sizeof(PageHeader) + header.num_slots * static_cast<int>(sizeof(Slot)));
-        return header.free_ptr - slotDirectoryEnd;
-    }
-
-    void initializeEmptyPage(std::vector<char>& page) const {
-        page.assign(PAGE_SIZE, 0);
-        PageHeader header{};
-        header.num_slots = 0;
-        header.free_ptr = PAGE_SIZE;
-        std::memcpy(page.data(), &header, sizeof(PageHeader));
-    }
-
+class SlottedPage {
 public:
-    explicit VariableRecordFile(const std::string& filename) : filename(filename) {
-        file.open(filename, std::ios::in | std::ios::out | std::ios::binary);
+    char data[PAGE_SIZE];
 
-        if (!file.is_open()) {
-            std::ofstream creator(filename, std::ios::binary);
-            creator.close();
-
-            file.open(filename, std::ios::in | std::ios::out | std::ios::binary);
-            if (!file.is_open()) {
-                throw std::runtime_error("No se pudo abrir/crear el archivo binario");
-            }
-        }
-
-        if (pageCount() == 0) {
-            std::vector<char> page;
-            initializeEmptyPage(page);
-            writePage(0, page);
-        }
+    SlottedPage() {
+        memset(data, 0, PAGE_SIZE);
+        setNumSlots(0);
+        setFreePtr(PAGE_SIZE);
     }
 
-    ~VariableRecordFile() {
-        if (file.is_open()) {
-            file.close();
-        }
+    int getNumSlots() {
+        return *(int*)data;
     }
 
-    void add(const Record& record) {
-        std::vector<char> serialized = serialize(record);
-        const int needed = static_cast<int>(serialized.size()) + static_cast<int>(sizeof(Slot));
+    void setNumSlots(int n) {
+        memcpy(data, &n, sizeof(int));
+    }
 
-        int targetPageId = pageCount() - 1;
-        std::vector<char> page = readPage(targetPageId);
-        PageHeader header = readHeader(page);
+    int getFreePtr() {
+        return *(int*)(data + sizeof(int));
+    }
 
-        if (freeSpace(header) < needed) {
-            targetPageId = pageCount();
-            initializeEmptyPage(page);
-            header = readHeader(page);
-        }
+    void setFreePtr(int ptr) {
+        memcpy(data + sizeof(int), &ptr, sizeof(int));
+    }
 
-        header.free_ptr -= static_cast<int>(serialized.size());
-        const int dataOffset = header.free_ptr;
-        std::memcpy(page.data() + dataOffset, serialized.data(), serialized.size());
+    Slot getSlot(int i) {
+        Slot s;
+        int offset = sizeof(int)*2 + i*sizeof(Slot);
+        memcpy(&s, data + offset, sizeof(Slot));
+        return s;
+    }
 
-        Slot slot{};
-        slot.offset = dataOffset;
-        slot.length = static_cast<int>(serialized.size());
-        writeSlot(page, header.num_slots, slot);
+    void setSlot(int i, Slot s) {
+        int offset = sizeof(int)*2 + i*sizeof(Slot);
+        memcpy(data + offset, &s, sizeof(Slot));
+    }
 
-        header.num_slots += 1;
-        writeHeader(page, header);
+    bool addRecord(const Record& r) {
+        vector<char> bytes = serialize(r);
+        int recSize = bytes.size();
 
-        writePage(targetPageId, page);
+        int numSlots = getNumSlots();
+        int freePtr = getFreePtr();
+
+        int headerEnd = sizeof(int)*2 + (numSlots+1)*sizeof(Slot);
+
+        if (freePtr - recSize < headerEnd) return false;
+
+        freePtr -= recSize;
+        memcpy(data + freePtr, bytes.data(), recSize);
+
+        Slot s = {freePtr, recSize};
+        setSlot(numSlots, s);
+
+        setNumSlots(numSlots + 1);
+        setFreePtr(freePtr);
+
+        return true;
     }
 
     Record readRecord(int pos) {
-        if (pos < 0) {
-            throw std::out_of_range("Posición de registro inválida");
-        }
+        Slot s = getSlot(pos);
+        if (s.length == -1) throw runtime_error("Registro eliminado");
 
-        int remaining = pos;
-        const int pages = pageCount();
-
-        for (int pageId = 0; pageId < pages; ++pageId) {
-            const std::vector<char> page = readPage(pageId);
-            const PageHeader header = readHeader(page);
-
-            if (remaining < header.num_slots) {
-                const Slot slot = readSlot(page, remaining);
-                if (slot.length == INVALID_LENGTH) {
-                    throw std::runtime_error("El registro fue eliminado");
-                }
-
-                if (slot.offset < 0 || slot.offset + slot.length > PAGE_SIZE) {
-                    throw std::runtime_error("Slot corrupto");
-                }
-
-                std::vector<char> payload(static_cast<std::size_t>(slot.length));
-                std::memcpy(payload.data(), page.data() + slot.offset, static_cast<std::size_t>(slot.length));
-                return deserialize(payload);
-            }
-
-            remaining -= header.num_slots;
-        }
-
-        throw std::out_of_range("Registro fuera de rango");
+        return deserialize(data + s.offset);
     }
 
-    void remove(int pos) {
-        if (pos < 0) {
-            throw std::out_of_range("Posición de registro inválida");
+    void removeRecord(int pos) {
+        Slot s = getSlot(pos);
+        s.length = -1;
+        setSlot(pos, s);
+    }
+};
+
+
+class HeapFile {
+    string filename;
+
+public:
+    HeapFile(string fname) : filename(fname) {}
+
+    void add(const Record& r) {
+        fstream file(filename, ios::in | ios::out | ios::binary);
+
+        if (!file) {
+            file.open(filename, ios::out | ios::binary);
+            file.close();
+            file.open(filename, ios::in | ios::out | ios::binary);
         }
 
-        int remaining = pos;
-        const int pages = pageCount();
+        SlottedPage page;
+        bool inserted = false;
 
-        for (int pageId = 0; pageId < pages; ++pageId) {
-            std::vector<char> page = readPage(pageId);
-            const PageHeader header = readHeader(page);
+        file.seekg(0, ios::beg);
 
-            if (remaining < header.num_slots) {
-                Slot slot = readSlot(page, remaining);
-                slot.length = INVALID_LENGTH;
-                writeSlot(page, remaining, slot);
-                writePage(pageId, page);
-                return;
+        while (file.read(page.data, PAGE_SIZE)) {
+            if (page.addRecord(r)) {
+                file.seekp(-PAGE_SIZE, ios::cur);
+                file.write(page.data, PAGE_SIZE);
+                inserted = true;
+                break;
             }
-
-            remaining -= header.num_slots;
         }
 
-        throw std::out_of_range("Registro fuera de rango");
+        if (!inserted) {
+            SlottedPage newPage;
+            newPage.addRecord(r);
+            file.clear();
+            file.seekp(0, ios::end);
+            file.write(newPage.data, PAGE_SIZE);
+        }
+
+        file.close();
     }
 
-    std::vector<Record> load() {
-        std::vector<Record> result;
-        const int pages = pageCount();
+    vector<Record> load() {
+        vector<Record> res;
+        ifstream file(filename, ios::binary);
 
-        for (int pageId = 0; pageId < pages; ++pageId) {
-            const std::vector<char> page = readPage(pageId);
-            const PageHeader header = readHeader(page);
+        SlottedPage page;
 
-            for (int slotId = 0; slotId < header.num_slots; ++slotId) {
-                const Slot slot = readSlot(page, slotId);
-                if (slot.length == INVALID_LENGTH) {
-                    continue;
+        while (file.read(page.data, PAGE_SIZE)) {
+            int n = page.getNumSlots();
+            for (int i = 0; i < n; i++) {
+                Slot s = page.getSlot(i);
+                if (s.length != -1) {
+                    res.push_back(deserialize(page.data + s.offset));
                 }
-
-                if (slot.offset < 0 || slot.offset + slot.length > PAGE_SIZE) {
-                    throw std::runtime_error("Se encontró un slot inválido durante load()");
-                }
-
-                std::vector<char> payload(static_cast<std::size_t>(slot.length));
-                std::memcpy(payload.data(), page.data() + slot.offset, static_cast<std::size_t>(slot.length));
-                result.push_back(deserialize(payload));
             }
         }
 
-        return result;
+        return res;
     }
 };
 
 int main() {
-    try {
-        const int N = 120;
-        std::remove("data.bin");
-        VariableRecordFile file("data.bin");
+    HeapFile hf("data.dat");
 
-        for (int i = 0; i < N; i++) {
-            Record r = {
-                "COD" + std::to_string(i),
-                i % 10,
-                1000.0f + static_cast<float>(i) * 10.0f,
-                "obs " + std::to_string(i)
-            };
-            file.add(r);
-        }
+    Record r1 = {"A001", 1, 1500.5, "Obs1"};
+    Record r2 = {"A002", 2, 2000.0, "Obs2 larga"};
+    Record r3 = {"A003", 3, 1800.0, "Otra observacion"};
 
-        std::cout << "[OK] add(): se insertaron " << N << " registros" << std::endl;
+    hf.add(r1);
+    hf.add(r2);
+    hf.add(r3);
 
-        Record sample = file.readRecord(25);
-        std::cout << "[OK] readRecord(25): " << sample.codigo
-                  << ", ciclo=" << sample.ciclo
-                  << ", mensualidad=" << sample.mensualidad
-                  <<", observaciones=" << sample.observaciones << std::endl;
+    auto records = hf.load();
 
-        file.remove(10);
-        file.remove(11);
-        std::cout << "[OK] remove(): se eliminaron posiciones 10 y 11" << std::endl;
-
-        bool removedThrows = false;
-        try {
-            (void)file.readRecord(10);
-        } catch (const std::exception&) {
-            removedThrows = true;
-        }
-
-        std::vector<Record> all = file.load();
-        std::cout << "[OK] load(): total cargados = " << all.size() << std::endl;
-
-        if (!removedThrows) {
-            std::cerr << "[FAIL] readRecord() no lanzó excepción para registro eliminado" << std::endl;
-            return 1;
-        }
-
-        if (all.size() != static_cast<std::size_t>(N - 2)) {
-            std::cerr << "[FAIL] load() devolvió " << all.size()
-                      << " y se esperaba " << (N - 2) << std::endl;
-            return 1;
-        }
-
-        std::cout << "Pruebas funcionales OK" << std::endl;
-    } catch (const std::exception& ex) {
-        std::cerr << "Error: " << ex.what() << std::endl;
-        return 1;
+    for (auto& r : records) {
+        cout << r.codigo << " "
+             << r.ciclo << " "
+             << r.mensualidad << " "
+             << r.observaciones << endl;
     }
-
-    return 0;
 }
