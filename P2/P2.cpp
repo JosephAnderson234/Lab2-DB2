@@ -263,32 +263,60 @@ public:
 int main() {
     HeapFile hf("data.dat");
 
-    hf.add({"A001", 1, 1500.5, "Obs corta"});
-    hf.add({"A002", 2, 2000.0, "Observacion mas larga"});
-    hf.add({"A003", 3, 1800.0, "Texto adicional"});
 
-    cout << "---- LOAD ----\n";
+    for (int i = 0; i < 100; i++) {
+        Record r;
+        r.codigo = "A" + to_string(1000 + i);
+        r.ciclo = (i % 10) + 1;
+        r.mensualidad = 1000 + i * 10;
+        r.observaciones = "Observacion numero " + to_string(i);
+
+        hf.add(r);
+    }
+
+    cout << "Se insertaron 100 registros.\n";
+
     auto records = hf.load();
-    for (auto& r : records) {
+    cout << "\nTotal registros leidos: " << records.size() << endl;
+
+
+    cout << "\nPrimeros 10 registros:\n";
+    for (int i = 0; i < 10 && i < records.size(); i++) {
+        cout << records[i].codigo << " "
+             << records[i].ciclo << " "
+             << records[i].mensualidad << " "
+             << records[i].observaciones << endl;
+    }
+
+    cout << "\nLeyendo posicion 50:\n";
+    try {
+        Record r = hf.readRecord(50);
         cout << r.codigo << " "
              << r.ciclo << " "
              << r.mensualidad << " "
              << r.observaciones << endl;
+    } catch (exception& e) {
+        cout << e.what() << endl;
     }
 
-    cout << "\n---- READ (pos 1) ----\n";
-    auto r = hf.readRecord(1);
-    cout << r.codigo << endl;
 
-    cout << "\n---- DELETE (pos 1) ----\n";
-    hf.remove(1);
+    cout << "\nEliminando posiciones 10, 20, 30...\n";
+    hf.remove(10);
+    hf.remove(20);
+    hf.remove(30);
 
-    cout << "\n---- LOAD AFTER DELETE ----\n";
+
     records = hf.load();
-    for (auto& r : records) {
-        cout << r.codigo << " "
-             << r.ciclo << " "
-             << r.mensualidad << " "
-             << r.observaciones << endl;
+    cout << "\nTotal registros despues de eliminar: " << records.size() << endl;
+
+    // Mostrar algunos registros para validar
+    cout << "\nAlgunos registros despues de eliminar:\n";
+    for (int i = 0; i < 10 && i < records.size(); i++) {
+        cout << records[i].codigo << " "
+             << records[i].ciclo << " "
+             << records[i].mensualidad << " "
+             << records[i].observaciones << endl;
     }
+
+    return 0;
 }
